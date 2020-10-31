@@ -11,6 +11,14 @@
 #include <detours.h>
 #pragma comment(lib, "detours.lib")
 
+// ImGui
+#include "imgui.h"
+#include "imgui_impl_win32.h"
+#include "imgui_impl_dx11.h"
+
+// ImGui definitions
+extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
 // Direct X definitions
 typedef HRESULT(__stdcall* IDXGISwapChainPresent)(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
 IDXGISwapChainPresent fnIDXGISwapChainPresent;
@@ -19,37 +27,98 @@ IDXGISwapChainPresent fnIDXGISwapChainPresent;
 ID3D11Device* pDevice;
 IDXGISwapChain* pSwapchain;
 ID3D11DeviceContext* pContext;
+ID3D11RenderTargetView* pRenderTargetView;
 HWND hWindow;
 bool bGraphicsInitialised = false;
+
+// Window and input
+WNDPROC wndProcHandlerOriginal;
+LRESULT CALLBACK hWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+
+bool InitDirectXAndInput(IDXGISwapChain* pChain);
 
 HRESULT __stdcall IDXGISwapChain_Present(IDXGISwapChain* pChain, UINT SyncInterval, UINT Flags)
 {
 	// Get device and swapchain
 	if (!bGraphicsInitialised)
 	{
-		// Get swapchain
-		pSwapchain = pChain;
+		// Init Direct X
+		if (!InitDirectXAndInput(pChain)) return fnIDXGISwapChainPresent(pChain, SyncInterval, Flags);
 
-		// Get device and context
-		HRESULT hr = pSwapchain->GetDevice(__uuidof(ID3D11Device), (PVOID*)&pDevice);
+		// Init ImGui
+		ImGui::CreateContext();
+		ImGuiIO& io = ImGui::GetIO(); (void)io;
+		io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+		
+		// Setup rendering and IO
+		ImGui_ImplWin32_Init(hWindow);
+		ImGui_ImplDX11_Init(pDevice, pContext);
+		ImGui::GetIO().ImeWindowHandle = hWindow;
+
+		// Create render target view for rendering
+		ID3D11Texture2D* pBackBuffer;
+		pChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (LPVOID*)&pBackBuffer);
+		HRESULT hr = pDevice->CreateRenderTargetView(pBackBuffer, NULL, &pRenderTargetView);
 		if (FAILED(hr))
-		{
-			std::cerr << "Failed to get device from swapchain" << std::endl;
+		{ 
+			std::cerr << "Failed to create render target view" << std::endl; 
 			return fnIDXGISwapChainPresent(pChain, SyncInterval, Flags);
 		}
-		pDevice->GetImmediateContext(&pContext);
-
-		// Get window from swapchain description
-		DXGI_SWAP_CHAIN_DESC swapchainDescription;
-		pSwapchain->GetDesc(&swapchainDescription);
-		hWindow = swapchainDescription.OutputWindow;
-
-		std::cout << "Successfully initialised DirectX - resolution " << swapchainDescription.BufferDesc.Width  << "x" << swapchainDescription.BufferDesc.Height << std::endl;
+		pBackBuffer->Release();
 
 		bGraphicsInitialised = true;
 	}
 	
+	// Render ImGui
+	ImGui_ImplDX11_NewFrame();
+	ImGui_ImplWin32_NewFrame();
+
+	ImGui::NewFrame();
+	bool bShow = true;
+	ImGui::ShowDemoWindow(&bShow);
+	ImGui::EndFrame();
+
+	ImGui::Render();
+
+	pContext->OMSetRenderTargets(1, &pRenderTargetView, NULL);
+	ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+
 	return fnIDXGISwapChainPresent(pChain, SyncInterval, Flags);
+}
+
+bool InitDirectXAndInput(IDXGISwapChain* pChain)
+{
+	// Get swapchain
+	pSwapchain = pChain;
+
+	// Get device and context
+	HRESULT hr = pSwapchain->GetDevice(__uuidof(ID3D11Device), (PVOID*)&pDevice);
+	if (FAILED(hr))
+	{
+		std::cerr << "Failed to get device from swapchain" << std::endl;
+		return false;
+	}
+	pDevice->GetImmediateContext(&pContext);
+
+	// Get window from swapchain description
+	DXGI_SWAP_CHAIN_DESC swapchainDescription;
+	pSwapchain->GetDesc(&swapchainDescription);
+	hWindow = swapchainDescription.OutputWindow;
+
+	// Use SetWindowLongPtr to modify window behaviour and get input
+	wndProcHandlerOriginal = (WNDPROC)SetWindowLongPtr(hWindow, GWLP_WNDPROC, (LONG_PTR)hWndProc);
+
+	std::cout << "Successfully initialised DirectX - resolution " << swapchainDescription.BufferDesc.Width << "x" << swapchainDescription.BufferDesc.Height << std::endl;
+	return true;
+}
+
+LRESULT CALLBACK hWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+	// Process input and pass to ImGui
+	if (ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam))
+		return true;
+
+	return CallWindowProc(wndProcHandlerOriginal, hWnd, uMsg, wParam, lParam);
 }
 
 DWORD WINAPI SpawnConsoleThread(HMODULE hModule)
